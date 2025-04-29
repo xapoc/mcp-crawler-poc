@@ -10,6 +10,7 @@ python = "^3.10"
 mcp = {version = "1.6.0", extras = ["cli"]}
 requests = "2.32.3"
 selenium = "4.14.0"
+starlette = "0.46.2"
 
 
 [build-system]

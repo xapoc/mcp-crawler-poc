@@ -1,3 +1,6 @@
+import random
+import time
+
 from mcp.server.fastmcp import FastMCP
 
 from selenium import webdriver
@@ -7,10 +10,15 @@ from selenium.webdriver.support.expected_conditions import staleness_of
 from selenium.webdriver.support.ui import WebDriverWait
 from selenium.webdriver.firefox.options import Options
 
+
 driver = None
+mcp = FastMCP("OpenAPI Seeker")  # , log_level="ERROR")
 
 
-def drive():
+@mcp.tool()
+def selenium_start():
+    global driver
+
     options = Options()
     # options.add_argument("--headless")
 
@@ -25,22 +33,87 @@ def drive():
     driver.set_page_load_timeout(60)
 
 
-mcp = FastMCP("OpenAPI Seeker", log_level="ERROR")
+@mcp.tool()
+def selenium_stop():
+    global driver
+
+    driver.quit()
 
 
 @mcp.tool()
-def get_greeted(name: str) -> str:
-    return f"Greetings from mcp tool, {name}!"
+def selenium_follow_link(url: str) -> bool:
+    global driver
+
+    driver.get(url)
+    time.sleep(random.randint(0, 30))
 
 
-@mcp.resource("greeting://{name}")
-def get_greeting(name: str) -> str:
-    return f"Hello {name}"
+@mcp.tool()
+def selenium_collect_links() -> dict[str, str]:
+    global driver
+
+    links = {}
+
+    for e in driver.find_elements(By.CSS_SELECTOR, "a"):
+        links[e.text] = e.get_attribute("href")
+
+    return links
+
+
+@mcp.tool()
+def selenium_collect_text(page: int = 1) -> str:
+    global driver
+
+    body = driver.find_element(By.CSS_SELECTOR, "body")
+    if body is None:
+        return "blank page"
+
+    text = body.text
+    chars_per_page = 500
+
+    lower = (page - 1) * chars_per_page
+    upper = lower + chars_per_page
+    return text[lower : lower + upper]
+
+
+@mcp.tool()
+def report_found_schema(url: str) -> None:
+    print(url)
+
+
+@mcp.resource("context://{target}")
+def current_context(target: str) -> dict:
+    if "current" == target:
+        global driver
+
+        return {"driver": str(driver)}
+
+    return {}
+
+
+@mcp.resource("credentials://{name}")
+def get_credentials(name: str) -> dict:
+    if "example" != name:
+        raise Exception("Credentials not found!")
+
+    # @note dummy data for the example
+    a_usr, a_pwd = ("test", "test")
+
+    # some credential-obtaining code in between
+
+    return {"username": a_usr, "password": a_pwd}
 
 
 @mcp.prompt()
-def on_greeter_prompt(message: str) -> str:
-    return f"Summarize the following message please: {message}"
+def try_feed(feed: str) -> str:
+    """a formulaic instruction the agent can use to communicate with other LLMs"""
+    return f"""You are a helpful assistant, your assignment is to parse given feeds.
+    Respond with _only_ a JSON document with the following structure (sample uses dollar sign to signify variable data):
+    {
+      "agent": "try_feed",
+      "result": $resultDataHere
+    }
+    """
 
 
 if __name__ == "__main__":
