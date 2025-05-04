@@ -10,10 +10,12 @@ from collections import deque
 from mcp.client.session import ClientSession
 from mcp.client.stdio import StdioServerParameters, stdio_client
 
-from pydantic import BaseModel
+from pydantic import BaseModel, Field
 
-EVENT_LIMIT = 30
+EVENT_LIMIT = 999
 ROLE_DELEGATION = ROLE_MCP_SERVER = "user"
+
+transcript = deque([], maxlen=EVENT_LIMIT)
 
 
 class F:
@@ -22,52 +24,64 @@ class F:
     def json_schema(e: object):
         return e.model_json_schema()
 
+    @staticmethod
+    def joined_row(data: dict):
+        s = ""
+        for k, v in data.items():
+            s += f"{k}: {v}; "
+
+        return s
+
+    @staticmethod
+    def joined_col(data: dict):
+        pairs = []
+        for k, v in data.items():
+            pairs.append(f"{k}={v}")
+
+        return ", ".join(pairs)
+
 
 class MCPOutput(BaseModel):
     action: typing.Literal[
-        "list_tools",
-        "list_prompts",
-        "list_resources",
+        "query_tools",
+        "query_prompts",
+        "query_resources",
         "call_tool",
         "get_prompt",
         "read_resource",
-    ]
-    tool_name: str | None
-    resource_name: str | None
-    prompt_name: str | None
-    arguments: dict
+    ] = Field(
+        description="Action to take.",
+    )
+    name: str | None = Field(
+        description="Name of the tool/resource/prompt to call, only applicable if action is call_tool/read_resource/get_prompt",
+    )
+    arguments: dict = Field(
+        description="Arguments to pass to call_tool/read_resource/get_prompt, according to the appropriate schema for the given tool/resource/prompt gotten from list_tools/list_resources/list_prompts",
+    )
+    a_10_word_explanation: str = Field(
+        description="A short (max 10 words) explanation why the response is what it is.",
+    )
 
 
-def agent(prompt: str, transcript: dict) -> str:
+def agent(prompt: str, messages: list[dict]) -> str:
     if not transcript:
         raise Exception("No message?")
 
     sysprompt: dict = {
         "role": "system",
-        "content": f"""You are an AI agent.
-
-        You have MCP (model context protocol) tools, resources, and prompts at your disposal.
-        These are colloquially called "MCP instruments".
-
-        You can ask for available instruments with the appropriate action, then use them appropriately.
-        This is the expected structure for all responses: {MCPOutput.model_json_schema()}.
-
-        Don't respond with non-existent combinations of instruments and various parameters.
-        Beware that a single instrument is almost never enough to accomplish a goal.
-        
-        Solve problems from top to bottom - if solving minutiae will not help achieving the goal, do something else.
-        Must respond with only a JSON document on a single line, nothing else.""",
+        "content": f"""Interact with the user in order to accomplish their stated goal(s).
+        Always respond in the following structure ({MCPOutput.model_json_schema()}). Set all properties to null unless absolutely positive that some other value is appropriate.""",
     }
 
     payload = {
         "model": "deepseek-v2",
         "response_format": "json",
         "format": MCPOutput.model_json_schema(),
-        "messages": [sysprompt, {"role": "user", "content": prompt}, *transcript],
+        "messages": [sysprompt, {"role": "user", "content": prompt}, *messages],
     }
 
     print(" <<")
-    print(transcript[-1])
+    print(messages[-1])
     print("\n\n--\n\n")
 
     with requests.Session().post(
@@ -97,106 +111,165 @@ async def main():
         async with ClientSession(read, write) as session:
             await session.initialize()
 
-            instruction: str = f"""Please use the given instruments to crawl the web at a reasonable pace and look for paths ending with .../openapi.json.
-            Try to optimize navigation in order to increase chances of finding such paths.
-            If OpenAPI schema files are found, use report_found_schema tool to report them in.
-            """
+            instruction: str = (
+                f"""Tell me how to use the instruments that I tell you about to crawl the web and find publicly accessible servers with an openapi.json schema."""
+            )
 
-            transcript: str = [
+            context = await session.read_resource("context://current")
+            ctx = json.loads(context.contents[0].text)
+
+            print(MCPOutput.model_json_schema())
+
+            transcript.append(
                 {
                     "role": "user",
-                    "content": "choose MCP instruments to accomplish the goal",
+                    "content": json.dumps(
+                        {
+                            "reply": "always start by querying for environment state and available tooling",
+                            "context": ctx,
+                        }
+                    ),
                 }
-            ]
+            )
 
             while True:
                 # instruction: str = input("Ask it to do something: ")
                 response = agent(
                     instruction,
-                    transcript,
+                    list(transcript),
                 )
 
                 machined = {"role": "assistant", "content": response}
                 output = MCPOutput.model_validate(response)
 
-                ctx = await session.read_resource("context://current")
-                ctxstr = f"; and current context is {ctx}"
+                transcript.append(
+                    {"role": "assistance", "content": json.dumps(machined["content"])}
+                )
+
+                context = await session.read_resource("context://current")
+                ctx = json.loads(context.contents[0].text)
 
                 try:
-                    if "list_tools" == output.action:
+                    if "query_tools" == output.action:
                         result = await session.list_tools()
-                        transcript = [
+                        transcript.append(
                             {
                                 "role": ROLE_MCP_SERVER,
                                 "content": json.dumps(
-                                    list(map(F.json_schema, result.tools))
-                                )
-                                + ctxstr,
+                                    {
+                                        "tools": list(
+                                            map(
+                                                json.loads,
+                                                map(
+                                                    operator.methodcaller("json"),
+                                                    result.tools,
+                                                ),
+                                            )
+                                        ),
+                                        "context": ctx,
+                                    }
+                                ),
                             }
-                        ]
+                        )
 
-                    if "list_prompts" == output.action:
+                    if "query_prompts" == output.action:
                         result = await session.list_prompts()
-                        transcript = [
+                        transcript.append(
                             {
                                 "role": ROLE_MCP_SERVER,
                                 "content": json.dumps(
-                                    list(map(F.json_schema, result.prompts))
-                                )
-                                + ctxstr,
+                                    {
+                                        "prompts": list(
+                                            map(
+                                                json.loads,
+                                                map(
+                                                    operator.methodcaller("json"),
+                                                    result.prompts,
+                                                ),
+                                            )
+                                        ),
+                                        "context": ctx,
+                                    }
+                                ),
                             }
-                        ]
+                        )
 
-                    if "list_resources" == output.action:
+                    if "query_resources" == output.action:
                         result = await session.list_resources()
-                        transcript = [
+                        transcript.append(
                             {
                                 "role": ROLE_MCP_SERVER,
                                 "content": json.dumps(
-                                    list(map(F.json_schema, result.resources))
-                                )
-                                + ctxstr,
+                                    {
+                                        "resources": list(
+                                            map(
+                                                json.loads,
+                                                map(
+                                                    operator.methodcaller("json"),
+                                                    result.resources,
+                                                ),
+                                            )
+                                        ),
+                                        "context": ctx,
+                                    }
+                                ),
                             }
-                        ]
+                        )
 
                     if "call_tool" == output.action:
-                        result = await session.call_tool(
-                            output.tool_name, output.arguments
-                        )
-                        transcript = [
+                        result = await session.call_tool(output.name, output.arguments)
+                        transcript.append(
                             {
                                 "role": ROLE_MCP_SERVER,
-                                "content": result.content[0].text + ctxstr,
+                                "content": json.dumps(
+                                    {
+                                        "tool_output": result.content[0].text,
+                                        "context": ctx,
+                                    }
+                                ),
                             },
-                        ]
+                        )
 
                     if "read_resource" == output.action:
-                        result = await session.read_resource(output.resource_name)
-                        transcript = [
+                        result = await session.read_resource(output.name)
+                        transcript.append(
                             {
                                 "role": ROLE_MCP_SERVER,
-                                "content": result.content[0].text + ctxstr,
+                                "content": json.dumps(
+                                    {
+                                        "resource": result.content[0].text,
+                                        "context": ctx,
+                                    }
+                                ),
                             },
-                        ]
+                        )
 
                     if "get_prompt" == output.action:
-                        result = await session.get_prompt(
-                            output.prompt_name, output.arguments
-                        )
-                        transcript = [
+                        result = await session.get_prompt(output.name, output.arguments)
+                        transcript.append(
                             {
                                 "role": ROLE_DELEGATION,
-                                "content": delegate(result.content[0].text) + ctxstr,
+                                "content": json.dumps(
+                                    {
+                                        "prompt": delegate(result.content[0].text),
+                                        "context": ctx,
+                                    }
+                                ),
                             },
-                        ]
+                        )
 
                 except Exception as ex:
-                    transcript = [
+                    transcript.append(
                         {
                             "role": "user",
-                            "content": f"""Exception: {ex}""",
+                            "content": json.dumps(
+                                {
+                                    "reply": f"""Exception: {ex}""",
+                                    "context": ctx,
+                                }
+                            ),
                         },
-                    ]
+                    )
 
                 time.sleep(1)
 

@@ -19,8 +19,11 @@ mcp = FastMCP("OpenAPI Seeker")  # , log_level="ERROR")
 def selenium_start():
     global driver
 
+    if driver is not None:
+        return "ALREADY RUNNING"
+
     options = Options()
-    # options.add_argument("--headless")
+    options.add_argument("--headless")
 
     options.set_preference(
         "general.useragent.override",
@@ -31,6 +34,7 @@ def selenium_start():
 
     driver = webdriver.Firefox(options=options)
     driver.set_page_load_timeout(60)
+    return "STARTED"
 
 
 @mcp.tool()
@@ -77,7 +81,7 @@ def selenium_collect_text(page: int = 1) -> str:
 
 
 @mcp.tool()
-def report_found_schema(url: str) -> None:
+def report(url: str) -> None:
     print(url)
 
 
@@ -86,7 +90,11 @@ def current_context(target: str) -> dict:
     if "current" == target:
         global driver
 
-        return {"driver": str(driver)}
+        return {
+            "selenium_was_started": driver is not None,
+            "selenium_has_page": driver is not None and driver.current_url is not None,
+            "schema_was_found": False,
+        }
 
     return {}
 
