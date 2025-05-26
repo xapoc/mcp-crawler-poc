@@ -1,3 +1,4 @@
+import pydantic
 import random
 import time
 
@@ -15,33 +16,18 @@ driver = None
 mcp = FastMCP("OpenAPI Seeker")  # , log_level="ERROR")
 
 
-@mcp.tool()
-def selenium_start():
-    global driver
+options = Options()
+options.add_argument("--headless")
 
-    if driver is not None:
-        return "ALREADY RUNNING"
+options.set_preference(
+    "general.useragent.override",
+    "Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0",
+)
+options.set_preference("browser.download.folderList", 2)
+options.set_preference("javascript.enabled", False)
 
-    options = Options()
-    options.add_argument("--headless")
-
-    options.set_preference(
-        "general.useragent.override",
-        "Mozilla/5.0 (X11; Linux x86_64; rv:102.0) Gecko/20100101 Firefox/102.0",
-    )
-    options.set_preference("browser.download.folderList", 2)
-    options.set_preference("javascript.enabled", False)
-
-    driver = webdriver.Firefox(options=options)
-    driver.set_page_load_timeout(60)
-    return "STARTED"
-
-
-@mcp.tool()
-def selenium_stop():
-    global driver
-
-    driver.quit()
+driver = webdriver.Firefox(options=options)
+driver.set_page_load_timeout(60)
 
 
 @mcp.tool()
@@ -65,7 +51,7 @@ def selenium_collect_links() -> dict[str, str]:
 
 
 @mcp.tool()
-def selenium_collect_text(page: int = 1) -> str:
+def selenium_collect_text_500chars(page: int = 1) -> str:
     global driver
 
     body = driver.find_element(By.CSS_SELECTOR, "body")
@@ -110,6 +96,30 @@ def get_credentials(name: str) -> dict:
     # some credential-obtaining code in between
 
     return {"username": a_usr, "password": a_pwd}
+
+
+@mcp.prompt()
+def on_failure(ex: str):
+    if "ValidationError" in ex:
+        return f"Got a validation error, this means you passed in some arguments wrong. Try again with another approach."
+
+    return f"Got a generic exception back ({ex}, this usually means an error that has nothing to do with you had happened. Take a different approach to whatever you were doing."
+
+
+@mcp.prompt()
+def queried_tools(result: str):
+    return "You now have a listing of available tools. There should be no need to query again for some time."
+
+
+@mcp.prompt()
+def called_tool(result: str):
+    if "validation" in result.lower():
+        return f"A validation error was found in tool_call result, it likely means the arguments were wrong. {result.content[0].text}"
+
+    if "error" in result:
+        return f"An error was found in tool_call, this would mean it was called wrong: {result.content[0].text}"
+
+    return f"No errors found in tool_call result - pay attention to the current context state before choosing what to do next. e.g. if selenium_was_started is False and you called selenium_start tool - it is likely that the tool had silently failed."
 
 
 @mcp.prompt()

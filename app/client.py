@@ -43,24 +43,19 @@ class F:
 
 class MCPOutput(BaseModel):
     action: typing.Literal[
+        "call_tool",
         "query_tools",
         "query_prompts",
         "query_resources",
-        "call_tool",
-        "get_prompt",
+        # "get_prompt",
+        "call_prompt",
         "read_resource",
     ] = Field(
         description="Action to take.",
     )
-    name: str | None = Field(
-        description="Name of the tool/resource/prompt to call, only applicable if action is call_tool/read_resource/get_prompt",
-    )
-    arguments: dict = Field(
-        description="Arguments to pass to call_tool/read_resource/get_prompt, according to the appropriate schema for the given tool/resource/prompt gotten from list_tools/list_resources/list_prompts",
-    )
-    a_10_word_explanation: str = Field(
-        description="A short (max 10 words) explanation why the response is what it is.",
-    )
+    name: str | None = Field()
+    arguments: dict = Field()
+    a_10_word_explanation: str = Field()
 
 
 def agent(prompt: str, messages: list[dict]) -> str:
@@ -125,7 +120,7 @@ async def main():
                     "role": "user",
                     "content": json.dumps(
                         {
-                            "reply": "always start by querying for environment state and available tooling",
+                            "reply": "start crawling the web",
                             "context": ctx,
                         }
                     ),
@@ -152,20 +147,23 @@ async def main():
                 try:
                     if "query_tools" == output.action:
                         result = await session.list_tools()
+                        tools = list(
+                            map(
+                                json.loads,
+                                map(operator.methodcaller("json"), result.tools),
+                            )
+                        )
+                        reply = await session.get_prompt(
+                            "queried_tools", {"result": str(tools)}
+                        )
+
                         transcript.append(
                             {
                                 "role": ROLE_MCP_SERVER,
                                 "content": json.dumps(
                                     {
-                                        "tools": list(
-                                            map(
-                                                json.loads,
-                                                map(
-                                                    operator.methodcaller("json"),
-                                                    result.tools,
-                                                ),
-                                            )
-                                        ),
+                                        "reply": reply.messages[0].content.text,
+                                        "tools": tools,
                                         "context": ctx,
                                     }
                                 ),
@@ -218,11 +216,16 @@ async def main():
 
                     if "call_tool" == output.action:
                         result = await session.call_tool(output.name, output.arguments)
+                        reply = await session.get_prompt(
+                            "called_tool", {"result": result.content[0].text}
+                        )
+
                         transcript.append(
                             {
                                 "role": ROLE_MCP_SERVER,
                                 "content": json.dumps(
                                     {
+                                        "reply": reply.messages[0].content.text,
                                         "tool_output": result.content[0].text,
                                         "context": ctx,
                                     }
@@ -244,14 +247,17 @@ async def main():
                             },
                         )
 
-                    if "get_prompt" == output.action:
+                    if "call_prompt" == output.action:
                         result = await session.get_prompt(output.name, output.arguments)
                         transcript.append(
                             {
                                 "role": ROLE_DELEGATION,
                                 "content": json.dumps(
                                     {
-                                        "prompt": delegate(result.content[0].text),
+                                        "prompt": result.messages[0].content.text,
+                                        "response": delegate(
+                                            result.messages[0].content.text
+                                        ),
                                         "context": ctx,
                                     }
                                 ),
@@ -259,23 +265,27 @@ async def main():
                         )
 
                 except Exception as ex:
+                    reply = await session.get_prompt("on_failure", {"ex": str(ex)})
+
                     transcript.append(
                         {
                             "role": "user",
                             "content": json.dumps(
                                 {
-                                    "reply": f"""Exception: {ex}""",
+                                    "reply": reply.messages[
+                                        0
+                                    ].content.text,  # f"""Exception: {ex}""",
                                     "context": ctx,
                                 }
                             ),
                         },
                     )
 
-                time.sleep(1)
+                time.sleep(10)
 
 
 def delegate(text: str) -> str:
-    return "some response from llm"
+    return "some response from an LLM, IGNORE THIS - it's currently hardocded until back and forth with an LLM is implemented"
 
 
 if __name__ == "__main__":
